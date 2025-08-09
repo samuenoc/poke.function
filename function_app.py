@@ -10,6 +10,7 @@ import pandas as pd
 from azure.storage.blob import BlobServiceClient
 from typing import Dict, List, Optional
 import time
+import random  
 
 app = func.FunctionApp()
 load_dotenv()
@@ -39,16 +40,30 @@ def QueueTriggerPokeReport(azqueue: func.QueueMessage):
         request_info = get_request(id)
         pokemon_type = request_info[0]["type"]
         
+        # Obtener sample_size de la base de datos
+        sample_size = request_info[0].get("SampleSize")  # Puede ser None
+        logger.info(f"Sample size configurado: {sample_size}")
+        
         # Obtener lista básica de Pokémon
         basic_pokemons = get_pokemons(pokemon_type)
         logger.info(f"Obtenidos {len(basic_pokemons)} Pokémon del tipo {pokemon_type}")
         
-        # Enriquecer con detalles de cada Pokémon
+        # Aplicar muestreo aleatorio SI se especificó sample_size
+        if sample_size is not None and sample_size > 0 and sample_size < len(basic_pokemons):
+            logger.info(f"Aplicando muestreo aleatorio: {sample_size} de {len(basic_pokemons)} Pokémon")
+            basic_pokemons = random.sample(basic_pokemons, sample_size)
+            logger.info(f"Muestra aleatoria seleccionada: {len(basic_pokemons)} Pokémon")
+        elif sample_size is not None and sample_size >= len(basic_pokemons):
+            logger.info(f"Sample size ({sample_size}) >= total disponible ({len(basic_pokemons)}). Usando todos los Pokémon.")
+        else:
+            logger.info("Sin muestreo - usando todos los Pokémon disponibles")
+        
+        # Enriquecer con detalles de cada Pokémon (ahora con la muestra si aplica)
         detailed_pokemons = get_detailed_pokemons(basic_pokemons)
         logger.info(f"Enriquecidos {len(detailed_pokemons)} Pokémon con detalles")
         
         # Generar CSV con datos enriquecidos
-        pokemon_bytes = generate_enhanced_csv_to_blob(detailed_pokemons)
+        pokemon_bytes = generate_enhanced_csv_to_blob(detailed_pokemons, sample_size)
         blob_name = f"poke_report_{id}.csv"
         
         upload_csv_to_blob(blob_name=blob_name, csv_data=pokemon_bytes)
@@ -201,9 +216,10 @@ def get_detailed_pokemons(basic_pokemons: List[Dict]) -> List[Dict]:
     logger.info(f"Procesamiento completado. {len(detailed_pokemons)} Pokémon enriquecidos")
     return detailed_pokemons
 
-def generate_enhanced_csv_to_blob(pokemon_list: List[Dict]) -> bytes:
+def generate_enhanced_csv_to_blob(pokemon_list: List[Dict], sample_size: Optional[int] = None) -> bytes:
     """
     Genera un CSV enriquecido con estadísticas base y habilidades
+    Incluye información sobre el muestreo si se aplicó
     """
     if not pokemon_list:
         logger.warning("Lista de Pokémon vacía")
@@ -237,13 +253,23 @@ def generate_enhanced_csv_to_blob(pokemon_list: List[Dict]) -> bytes:
         df['Height_m'] = df['height'] / 10  # Convertir decímetros a metros
         df['Weight_kg'] = df['weight'] / 10  # Convertir hectogramos a kilogramos
     
-    # Generar CSV
+    # Generar CSV con información adicional sobre el muestreo
     output = io.StringIO()
+    
+    # Agregar comentario informativo al inicio del CSV si se aplicó muestreo
+    if sample_size is not None and sample_size > 0:
+        output.write(f"# REPORTE CON MUESTREO ALEATORIO\n")
+        output.write(f"# Muestra aleatoria de {len(df)} Pokémon (sample_size: {sample_size})\n")
+        output.write(f"# Generado: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        output.write(f"#\n")
+    
+    # Escribir el DataFrame como CSV
     df.to_csv(output, index=False, encoding='utf-8')
     csv_bytes = output.getvalue().encode('utf-8')
     output.close()
     
-    logger.info(f"CSV generado con {len(df)} filas y {len(df.columns)} columnas")
+    sampling_info = f" (muestra de {sample_size})" if sample_size else ""
+    logger.info(f"CSV generado con {len(df)} filas y {len(df.columns)} columnas{sampling_info}")
     return csv_bytes
 
 def upload_csv_to_blob(blob_name: str, csv_data: bytes):
